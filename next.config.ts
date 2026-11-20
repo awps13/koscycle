@@ -1,9 +1,14 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  images: {
+    // Loader kustom: gambar Cloudinary di-resize lewat transformasi Cloudinary,
+    // gambar Unsplash (data seed) lewat parameter URL-nya.
+    loader: "custom",
+    loaderFile: "./src/lib/image-loader.ts",
+  },
   turbopack: {
     rules: {
       "*.css": {

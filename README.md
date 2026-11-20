@@ -1,36 +1,96 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# KosCycle — Marketplace Barang Bekas Mahasiswa
 
-## Getting Started
+Platform untuk anak kos **menjual, membarter, atau menghibahkan** barang (meja, rak, kipas, dispenser, alat masak, dll.) saat pindah kos.
 
-First, run the development server:
+**Stack:** Next.js 16 (App Router, Cache Components) · shadcn/ui (Base UI) · Tailwind CSS v4 · Drizzle ORM · Vercel Postgres (Neon) · Better Auth · Cloudinary
+
+## Fitur
+
+- Landing page sesuai desain (hero + pencarian kampus/kategori, kategori, katalog dengan filter jenis)
+- Jelajah barang: cari kata kunci, filter kategori/kampus/jenis, urutkan harga, pagination
+- Barter Hub & Hibah Gratis
+- Detail barang: galeri foto, info penjual + badge KTM, barang serupa
+- Daftar/Masuk (email + password)
+- Pasang & edit iklan, upload foto langsung ke **Cloudinary** (signed upload)
+- Wajib unggah KTM sebelum pasang iklan; badge "terverifikasi" setelah dicek admin
+- Dashboard "Iklan Saya": ubah status (Aktif / Dipesan / Laku), edit, hapus
+- Favorit (ikon hati)
+- Chat pembeli ↔ penjual per barang (auto-refresh tiap 5 detik) + indikator pesan belum dibaca
+- Profil: nama, kampus, nomor WhatsApp, foto profil
+- Halaman Tips Pindah Kos & panduan COD aman
+
+## Setup
+
+### 1. Install
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm install
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Database (Vercel Postgres / Neon)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Vercel Dashboard → **Storage** → **Create Database** → pilih **Neon (Postgres)** → hubungkan ke project.
+2. Salin `DATABASE_URL` ke `.env.local` (atau `vercel link` lalu `vercel env pull .env.local`).
+3. Buat tabel & isi data contoh:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+pnpm db:push     # buat/sinkronkan tabel dari src/db/schema.ts
+pnpm db:seed     # opsional: 4 akun demo + 12 iklan contoh
+```
 
-## Learn More
+Akun demo: `raka@demo.koscycle.id` / `koscycle123` (juga salsa@, dimas@, nadia@).
 
-To learn more about Next.js, take a look at the following resources:
+> Untuk development offline, `DATABASE_URL` juga boleh berisi Postgres lokal biasa (mis. `postgresql://postgres@localhost:5432/koscycle`). URL Neon/Vercel otomatis memakai driver HTTP serverless.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 3. Better Auth
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+openssl rand -base64 32   # tempel ke BETTER_AUTH_SECRET
+```
 
-## Deploy on Vercel
+Set `BETTER_AUTH_URL` dan `NEXT_PUBLIC_APP_URL` ke URL aplikasi (lokal `http://localhost:3000`, produksi `https://domainmu.vercel.app`).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### 4. Cloudinary
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Cloudinary Console → Dashboard → salin **Cloud name, API Key, API Secret** ke:
+`CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME`.
+Tidak perlu membuat upload preset — upload memakai signature dari server.
+
+### 5. Jalankan
+
+```bash
+pnpm dev
+```
+
+## Verifikasi KTM (admin)
+
+Belum ada panel admin. Cek foto KTM lewat Drizzle Studio (`pnpm db:studio`), lalu ubah kolom `ktm_verified` user menjadi `true`. Atau dengan SQL:
+
+```sql
+update "user" set ktm_verified = true where email = 'mahasiswa@ui.ac.id';
+```
+
+## Deploy ke Vercel
+
+1. Push repo ke GitHub → Import di Vercel.
+2. Isi semua env dari `.env.example` di **Settings → Environment Variables** (`DATABASE_URL` otomatis terisi jika database dihubungkan dari tab Storage).
+3. Jalankan `pnpm db:push` sekali dari lokal ke database produksi.
+
+## Struktur
+
+```
+src/
+  app/                 # routes (/, /jelajah, /barter, /hibah, /barang/[id], /pasang-iklan, /dashboard, /pesan, /profil, ...)
+  components/          # ui/ (shadcn), layout/, home/, listing/, forms/, chat/
+  db/                  # schema.ts (Drizzle), index.ts, seed.ts
+  lib/
+    actions/           # Server Actions (iklan, favorit, chat, profil, upload)
+    queries.ts         # akses data (read)
+    auth.ts            # konfigurasi Better Auth
+    cloudinary.ts      # signing & hapus gambar
+    constants.ts       # kategori, kampus, jenis iklan, kondisi
+  proxy.ts             # proteksi route yang butuh login
+```
+
+Kategori dan daftar kampus diatur di `src/lib/constants.ts`.
