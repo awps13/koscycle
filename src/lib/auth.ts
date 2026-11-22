@@ -1,23 +1,14 @@
 import "server-only";
 import { betterAuth } from "better-auth";
-import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
-import { db } from "@/db";
-import * as schema from "@/db/schema";
+import { prisma } from "@/lib/prisma";
 
 export const auth = betterAuth({
   appName: "KosCycle",
   baseURL: process.env.BETTER_AUTH_URL,
   secret: process.env.BETTER_AUTH_SECRET,
-  database: drizzleAdapter(db, {
-    provider: "pg",
-    schema: {
-      user: schema.user,
-      session: schema.session,
-      account: schema.account,
-      verification: schema.verification,
-    },
-  }),
+  database: prismaAdapter(prisma, { provider: "postgresql" }),
   emailAndPassword: {
     enabled: true,
     minPasswordLength: 8,

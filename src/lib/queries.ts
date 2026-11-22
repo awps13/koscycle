@@ -1,39 +1,31 @@
 import "server-only";
 import { cache } from "react";
 import { connection } from "next/server";
-import { and, asc, count, desc, eq, gte, ilike, inArray, isNull, ne, or, sql, type SQL } from "drizzle-orm";
-import { db } from "@/db";
-import { conversation, favorite, listing, message, user } from "@/db/schema";
+import type { Prisma } from "@/generated/prisma/client";
+import { prisma } from "./prisma";
+import { asImages, isUuid } from "./types";
 import type { ListingStatus, ListingType } from "./constants";
 
 /* Semua query membaca data per-request (tidak di-cache). Dengan Cache Components,
  * komponen yang memanggil fungsi di sini harus berada di dalam <Suspense>. */
 
-const sellerColumns = {
-  id: user.id,
-  name: user.name,
-  image: user.image,
-  campus: user.campus,
-  ktmVerified: user.ktmVerified,
-};
+const sellerSelect = {
+  id: true,
+  name: true,
+  image: true,
+  campus: true,
+  ktmVerified: true,
+} satisfies Prisma.UserSelect;
 
-const listingColumns = {
-  id: listing.id,
-  title: listing.title,
-  description: listing.description,
-  category: listing.category,
-  campus: listing.campus,
-  area: listing.area,
-  type: listing.type,
-  price: listing.price,
-  barterWish: listing.barterWish,
-  condition: listing.condition,
-  images: listing.images,
-  status: listing.status,
-  createdAt: listing.createdAt,
-  updatedAt: listing.updatedAt,
-  sellerId: listing.sellerId,
-};
+const listingInclude = { seller: { select: sellerSelect } } satisfies Prisma.ListingInclude;
+
+type ListingRow = Prisma.ListingGetPayload<{ include: typeof listingInclude }>;
+
+function toListing<T extends { images: Prisma.JsonValue }>(row: T) {
+  return { ...row, images: asImages(row.images) };
+}
+
+export type ListingWithSeller = Omit<ListingRow, "images"> & { images: ReturnType<typeof asImages> };
 
 export type ListingFilters = {
   q?: string;
@@ -47,55 +39,56 @@ export type ListingFilters = {
   offset?: number;
 };
 
-function buildWhere(f: ListingFilters) {
-  const conds: SQL[] = [];
-  if (f.status !== "all") conds.push(eq(listing.status, f.status ?? "aktif"));
-  if (f.category) conds.push(eq(listing.category, f.category));
-  if (f.campus) conds.push(eq(listing.campus, f.campus));
-  if (f.type) conds.push(eq(listing.type, f.type));
-  if (f.excludeId) conds.push(ne(listing.id, f.excludeId));
-  if (f.q?.trim()) {
-    const term = `%${f.q.trim()}%`;
-    conds.push(or(ilike(listing.title, term), ilike(listing.description, term), ilike(listing.area, term))!);
+function buildWhere(f: ListingFilters): Prisma.ListingWhereInput {
+  const where: Prisma.ListingWhereInput = {};
+  if (f.status !== "all") where.status = f.status ?? "aktif";
+  if (f.category) where.category = f.category;
+  if (f.campus) where.campus = f.campus;
+  if (f.type) where.type = f.type;
+  if (f.excludeId) where.id = { not: f.excludeId };
+  const q = f.q?.trim();
+  if (q) {
+    where.OR = [
+      { title: { contains: q, mode: "insensitive" } },
+      { description: { contains: q, mode: "insensitive" } },
+      { area: { contains: q, mode: "insensitive" } },
+    ];
   }
-  return conds.length ? and(...conds) : undefined;
+  return where;
 }
 
-export async function getListings(f: ListingFilters = {}) {
+export async function getListings(f: ListingFilters = {}): Promise<ListingWithSeller[]> {
   await connection();
-  const order =
+  const orderBy: Prisma.ListingOrderByWithRelationInput[] =
     f.sort === "termurah"
-      ? [asc(sql`coalesce(${listing.price}, 0)`), desc(listing.createdAt)]
+      ? [{ price: { sort: "asc", nulls: "first" } }, { createdAt: "desc" }]
       : f.sort === "termahal"
-        ? [desc(sql`coalesce(${listing.price}, 0)`), desc(listing.createdAt)]
-        : [desc(listing.createdAt)];
+        ? [{ price: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }]
+        : [{ createdAt: "desc" }];
 
-  return db
-    .select({ ...listingColumns, seller: sellerColumns })
-    .from(listing)
-    .innerJoin(user, eq(listing.sellerId, user.id))
-    .where(buildWhere(f))
-    .orderBy(...order)
-    .limit(f.limit ?? 24)
-    .offset(f.offset ?? 0);
+  const rows = await prisma.listing.findMany({
+    where: buildWhere(f),
+    include: listingInclude,
+    orderBy,
+    take: f.limit ?? 24,
+    skip: f.offset ?? 0,
+  });
+  return rows.map(toListing);
 }
-
-export type ListingWithSeller = Awaited<ReturnType<typeof getListings>>[number];
 
 export async function countListings(f: ListingFilters = {}) {
   await connection();
-  const [row] = await db.select({ value: count() }).from(listing).where(buildWhere(f));
-  return row?.value ?? 0;
+  return prisma.listing.count({ where: buildWhere(f) });
 }
 
 export const getCategoryCounts = cache(async () => {
   await connection();
-  const rows = await db
-    .select({ category: listing.category, value: count() })
-    .from(listing)
-    .where(eq(listing.status, "aktif"))
-    .groupBy(listing.category);
-  return Object.fromEntries(rows.map((r) => [r.category, r.value])) as Record<string, number>;
+  const rows = await prisma.listing.groupBy({
+    by: ["category"],
+    where: { status: "aktif" },
+    _count: { _all: true },
+  });
+  return Object.fromEntries(rows.map((r) => [r.category, r._count._all])) as Record<string, number>;
 });
 
 export async function getStats() {
@@ -104,158 +97,129 @@ export async function getStats() {
   startOfMonth.setDate(1);
   startOfMonth.setHours(0, 0, 0, 0);
 
-  const [[sold], [campuses], [users], [verified]] = await Promise.all([
-    db
-      .select({ value: count() })
-      .from(listing)
-      .where(and(eq(listing.status, "terjual"), gte(listing.soldAt, startOfMonth))),
-    db.select({ value: sql<number>`count(distinct ${listing.campus})::int` }).from(listing),
-    db.select({ value: count() }).from(user),
-    db.select({ value: count() }).from(user).where(eq(user.ktmVerified, true)),
+  const [soldThisMonth, campuses, users, verifiedUsers] = await Promise.all([
+    prisma.listing.count({ where: { status: "terjual", soldAt: { gte: startOfMonth } } }),
+    prisma.listing.groupBy({ by: ["campus"] }),
+    prisma.user.count(),
+    prisma.user.count({ where: { ktmVerified: true } }),
   ]);
 
-  return {
-    soldThisMonth: sold?.value ?? 0,
-    activeCampuses: campuses?.value ?? 0,
-    users: users?.value ?? 0,
-    verifiedUsers: verified?.value ?? 0,
-  };
+  return { soldThisMonth, activeCampuses: campuses.length, users, verifiedUsers };
 }
 
 export async function getListingById(id: string) {
   await connection();
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
-  const [row] = await db
-    .select({
-      ...listingColumns,
-      seller: { ...sellerColumns, whatsapp: user.whatsapp, createdAt: user.createdAt },
-    })
-    .from(listing)
-    .innerJoin(user, eq(listing.sellerId, user.id))
-    .where(eq(listing.id, id))
-    .limit(1);
-  return row ?? null;
+  if (!isUuid(id)) return null;
+  const row = await prisma.listing.findUnique({
+    where: { id },
+    include: { seller: { select: { ...sellerSelect, whatsapp: true, createdAt: true } } },
+  });
+  return row ? toListing(row) : null;
 }
 
 export async function countSellerListings(sellerId: string) {
-  const [row] = await db.select({ value: count() }).from(listing).where(eq(listing.sellerId, sellerId));
-  return row?.value ?? 0;
+  return prisma.listing.count({ where: { sellerId } });
 }
 
-export async function getUserListings(userId: string) {
+export async function getUserListings(userId: string): Promise<ListingWithSeller[]> {
   await connection();
-  return db
-    .select({ ...listingColumns, seller: sellerColumns })
-    .from(listing)
-    .innerJoin(user, eq(listing.sellerId, user.id))
-    .where(eq(listing.sellerId, userId))
-    .orderBy(desc(listing.createdAt));
+  const rows = await prisma.listing.findMany({
+    where: { sellerId: userId },
+    include: listingInclude,
+    orderBy: { createdAt: "desc" },
+  });
+  return rows.map(toListing);
 }
 
 export async function getFavoriteIds(userId: string | undefined | null) {
   if (!userId) return new Set<string>();
   await connection();
-  const rows = await db
-    .select({ listingId: favorite.listingId })
-    .from(favorite)
-    .where(eq(favorite.userId, userId));
+  const rows = await prisma.favorite.findMany({ where: { userId }, select: { listingId: true } });
   return new Set(rows.map((r) => r.listingId));
 }
 
-export async function getFavoriteListings(userId: string) {
+export async function getFavoriteListings(userId: string): Promise<ListingWithSeller[]> {
   await connection();
-  return db
-    .select({ ...listingColumns, seller: sellerColumns })
-    .from(favorite)
-    .innerJoin(listing, eq(favorite.listingId, listing.id))
-    .innerJoin(user, eq(listing.sellerId, user.id))
-    .where(eq(favorite.userId, userId))
-    .orderBy(desc(favorite.createdAt));
+  const rows = await prisma.favorite.findMany({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+    include: { listing: { include: listingInclude } },
+  });
+  return rows.map((r) => toListing(r.listing));
 }
 
 /* ------------------------------ Chat ------------------------------ */
 
+const chatListingSelect = {
+  id: true,
+  title: true,
+  images: true,
+  type: true,
+  price: true,
+  barterWish: true,
+  status: true,
+} satisfies Prisma.ListingSelect;
+
 export async function getConversations(userId: string) {
   await connection();
-  const convs = await db.query.conversation.findMany({
-    where: or(eq(conversation.buyerId, userId), eq(conversation.sellerId, userId)),
-    orderBy: desc(conversation.updatedAt),
-    with: {
-      listing: { columns: { id: true, title: true, images: true, type: true, price: true, status: true } },
-      buyer: { columns: { id: true, name: true, image: true } },
-      seller: { columns: { id: true, name: true, image: true } },
-      messages: { orderBy: desc(message.createdAt), limit: 1 },
+  const convs = await prisma.conversation.findMany({
+    where: { OR: [{ buyerId: userId }, { sellerId: userId }] },
+    orderBy: { updatedAt: "desc" },
+    include: {
+      listing: { select: chatListingSelect },
+      buyer: { select: { id: true, name: true, image: true } },
+      seller: { select: { id: true, name: true, image: true } },
+      messages: { orderBy: { createdAt: "desc" }, take: 1 },
+      _count: {
+        select: { messages: { where: { senderId: { not: userId }, readAt: null } } },
+      },
     },
   });
 
-  if (convs.length === 0) return [];
-
-  const unread = await db
-    .select({ conversationId: message.conversationId, value: count() })
-    .from(message)
-    .where(
-      and(
-        inArray(
-          message.conversationId,
-          convs.map((c) => c.id),
-        ),
-        ne(message.senderId, userId),
-        isNull(message.readAt),
-      ),
-    )
-    .groupBy(message.conversationId);
-  const unreadMap = new Map(unread.map((u) => [u.conversationId, u.value]));
-
   return convs.map((c) => ({
     ...c,
+    listing: toListing(c.listing),
     other: c.buyerId === userId ? c.seller : c.buyer,
     lastMessage: c.messages[0] ?? null,
-    unread: unreadMap.get(c.id) ?? 0,
+    unread: c._count.messages,
   }));
 }
 
 export async function getConversation(id: string, userId: string) {
   await connection();
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
-  const conv = await db.query.conversation.findFirst({
-    where: and(
-      eq(conversation.id, id),
-      or(eq(conversation.buyerId, userId), eq(conversation.sellerId, userId)),
-    ),
-    with: {
-      listing: {
-        columns: { id: true, title: true, images: true, type: true, price: true, barterWish: true, status: true },
-      },
-      buyer: { columns: { id: true, name: true, image: true, ktmVerified: true, whatsapp: true } },
-      seller: { columns: { id: true, name: true, image: true, ktmVerified: true, whatsapp: true } },
-      messages: { orderBy: asc(message.createdAt) },
+  if (!isUuid(id)) return null;
+  const userSelect = { id: true, name: true, image: true, ktmVerified: true, whatsapp: true } as const;
+  const conv = await prisma.conversation.findFirst({
+    where: { id, OR: [{ buyerId: userId }, { sellerId: userId }] },
+    include: {
+      listing: { select: chatListingSelect },
+      buyer: { select: userSelect },
+      seller: { select: userSelect },
+      messages: { orderBy: { createdAt: "asc" } },
     },
   });
   if (!conv) return null;
-  return { ...conv, other: conv.buyerId === userId ? conv.seller : conv.buyer };
+  return {
+    ...conv,
+    listing: toListing(conv.listing),
+    other: conv.buyerId === userId ? conv.seller : conv.buyer,
+  };
 }
 
 export async function markConversationRead(conversationId: string, userId: string) {
-  await db
-    .update(message)
-    .set({ readAt: new Date() })
-    .where(
-      and(eq(message.conversationId, conversationId), ne(message.senderId, userId), isNull(message.readAt)),
-    );
+  await prisma.message.updateMany({
+    where: { conversationId, senderId: { not: userId }, readAt: null },
+    data: { readAt: new Date() },
+  });
 }
 
 export async function getUnreadCount(userId: string) {
   await connection();
-  const [row] = await db
-    .select({ value: count() })
-    .from(message)
-    .innerJoin(conversation, eq(message.conversationId, conversation.id))
-    .where(
-      and(
-        or(eq(conversation.buyerId, userId), eq(conversation.sellerId, userId)),
-        ne(message.senderId, userId),
-        isNull(message.readAt),
-      ),
-    );
-  return row?.value ?? 0;
+  return prisma.message.count({
+    where: {
+      senderId: { not: userId },
+      readAt: null,
+      conversation: { OR: [{ buyerId: userId }, { sellerId: userId }] },
+    },
+  });
 }

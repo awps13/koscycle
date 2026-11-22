@@ -2,7 +2,7 @@
 
 Platform untuk anak kos **menjual, membarter, atau menghibahkan** barang (meja, rak, kipas, dispenser, alat masak, dll.) saat pindah kos.
 
-**Stack:** Next.js 16 (App Router, Cache Components) · shadcn/ui (Base UI) · Tailwind CSS v4 · Drizzle ORM · Vercel Postgres (Neon) · Better Auth · Cloudinary
+**Stack:** Next.js 16 (App Router, Cache Components) · shadcn/ui (Base UI) · Tailwind CSS v4 · Prisma ORM 7 · Vercel Postgres (Neon) · Better Auth · Cloudinary
 
 ## Fitur
 
@@ -25,7 +25,7 @@ Platform untuk anak kos **menjual, membarter, atau menghibahkan** barang (meja, 
 
 ```bash
 pnpm install
-cp .env.example .env.local
+cp .env.example .env
 ```
 
 ### 2. Database (Vercel Postgres / Neon)
@@ -35,13 +35,15 @@ cp .env.example .env.local
 3. Buat tabel & isi data contoh:
 
 ```bash
-pnpm db:push     # buat/sinkronkan tabel dari src/db/schema.ts
-pnpm db:seed     # opsional: 4 akun demo + 12 iklan contoh
+pnpm db:push     # buat/sinkronkan tabel dari prisma/schema.prisma
+pnpm db:seed     # opsional: 4 akun demo + 12 iklan contoh (prisma/seed.ts)
 ```
 
 Akun demo: `raka@demo.koscycle.id` / `koscycle123` (juga salsa@, dimas@, nadia@).
 
-> Untuk development offline, `DATABASE_URL` juga boleh berisi Postgres lokal biasa (mis. `postgresql://postgres@localhost:5432/koscycle`). URL Neon/Vercel otomatis memakai driver HTTP serverless.
+> Untuk development offline, `DATABASE_URL` juga boleh berisi Postgres lokal biasa (mis. `postgresql://postgres@localhost:5432/koscycle`, tanpa `sslmode=require`). URL Neon/Vercel otomatis memakai adapter `@prisma/adapter-neon`, selain itu `@prisma/adapter-pg`.
+>
+> Prisma Client di-generate ke `src/generated/prisma` (otomatis saat `pnpm install` dan `pnpm build`). Setelah mengubah `prisma/schema.prisma`, jalankan `pnpm db:push` lalu `pnpm db:generate`.
 
 ### 3. Better Auth
 
@@ -65,7 +67,7 @@ pnpm dev
 
 ## Verifikasi KTM (admin)
 
-Belum ada panel admin. Cek foto KTM lewat Drizzle Studio (`pnpm db:studio`), lalu ubah kolom `ktm_verified` user menjadi `true`. Atau dengan SQL:
+Belum ada panel admin. Cek foto KTM lewat Prisma Studio (`pnpm db:studio`), lalu ubah kolom `ktm_verified` user menjadi `true`. Atau dengan SQL:
 
 ```sql
 update "user" set ktm_verified = true where email = 'mahasiswa@ui.ac.id';
@@ -75,17 +77,21 @@ update "user" set ktm_verified = true where email = 'mahasiswa@ui.ac.id';
 
 1. Push repo ke GitHub → Import di Vercel.
 2. Isi semua env dari `.env.example` di **Settings → Environment Variables** (`DATABASE_URL` otomatis terisi jika database dihubungkan dari tab Storage).
-3. Jalankan `pnpm db:push` sekali dari lokal ke database produksi.
+3. Jalankan `pnpm db:push` sekali dari lokal ke database produksi. Build di Vercel otomatis menjalankan `prisma generate`.
 
 ## Struktur
 
 ```
+prisma/
+  schema.prisma        # skema database
+  seed.ts              # data contoh
 src/
   app/                 # routes (/, /jelajah, /barter, /hibah, /barang/[id], /pasang-iklan, /dashboard, /pesan, /profil, ...)
   components/          # ui/ (shadcn), layout/, home/, listing/, forms/, chat/
-  db/                  # schema.ts (Drizzle), index.ts, seed.ts
+  generated/prisma/    # Prisma Client (hasil generate, tidak di-commit)
   lib/
     actions/           # Server Actions (iklan, favorit, chat, profil, upload)
+    prisma.ts          # instance Prisma Client (adapter Neon / pg)
     queries.ts         # akses data (read)
     auth.ts            # konfigurasi Better Auth
     cloudinary.ts      # signing & hapus gambar

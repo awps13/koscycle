@@ -1,10 +1,8 @@
 "use server";
 
 import { refresh } from "next/cache";
-import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "@/db";
-import { user } from "@/db/schema";
+import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/session";
 import { destroyImages, isOwnCloudinaryUrl } from "@/lib/cloudinary";
 import { CAMPUSES } from "@/lib/constants";
@@ -41,16 +39,15 @@ export async function updateProfile(_: ProfileFormState, formData: FormData): Pr
 
   const image = parsed.data.image && isOwnCloudinaryUrl(parsed.data.image) ? parsed.data.image : undefined;
 
-  await db
-    .update(user)
-    .set({
+  await prisma.user.update({
+    where: { id: session.user.id },
+    data: {
       name: parsed.data.name,
       campus: parsed.data.campus,
       whatsapp: parsed.data.whatsapp || null,
       ...(image ? { image } : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(user.id, session.user.id));
+    },
+  });
 
   refresh();
   return { ok: true, message: "Profil berhasil disimpan." };
@@ -61,13 +58,13 @@ export async function saveKtm(url: string, publicId?: string) {
   if (!session) return { ok: false, message: "Sesi berakhir, silakan masuk lagi." };
   if (!isOwnCloudinaryUrl(url)) return { ok: false, message: "URL KTM tidak valid." };
 
-  const [prev] = await db.select({ ktmUrl: user.ktmUrl }).from(user).where(eq(user.id, session.user.id));
+  const prev = await prisma.user.findUnique({ where: { id: session.user.id }, select: { ktmUrl: true } });
 
   // Upload KTM baru → status verifikasi direset sampai dicek ulang admin
-  await db
-    .update(user)
-    .set({ ktmUrl: url, ktmVerified: false, updatedAt: new Date() })
-    .where(eq(user.id, session.user.id));
+  await prisma.user.update({
+    where: { id: session.user.id },
+    data: { ktmUrl: url, ktmVerified: false },
+  });
 
   const prevId = prev?.ktmUrl?.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i)?.[1];
   if (prevId && prevId !== publicId) await destroyImages([prevId]);

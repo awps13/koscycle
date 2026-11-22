@@ -2,10 +2,9 @@
 
 import { redirect } from "next/navigation";
 import { refresh, revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "@/db";
-import { listing, type ListingImage } from "@/db/schema";
+import { prisma } from "@/lib/prisma";
+import { asImages, isUuid, type ListingImage } from "@/lib/types";
 import { getCurrentUser } from "@/lib/session";
 import { destroyImages, isOwnCloudinaryUrl } from "@/lib/cloudinary";
 import { CAMPUSES, CATEGORIES, CONDITIONS, LISTING_STATUSES } from "@/lib/constants";
@@ -110,10 +109,10 @@ export async function createListing(_: ListingFormState, formData: FormData): Pr
     return { errors: { images: "Foto harus diunggah lewat Cloudinary" } };
   }
 
-  const [created] = await db
-    .insert(listing)
-    .values({ ...values, sellerId: me.id })
-    .returning({ id: listing.id });
+  const created = await prisma.listing.create({
+    data: { ...values, sellerId: me.id },
+    select: { id: true },
+  });
 
   revalidatePath("/", "layout");
   redirect(`/barang/${created.id}?baru=1`);
@@ -126,12 +125,12 @@ export async function updateListing(
 ): Promise<ListingFormState> {
   const me = await getCurrentUser();
   if (!me) redirect(`/masuk?next=/barang/${id}/edit`);
+  if (!isUuid(id)) return { message: "Iklan tidak ditemukan." };
 
-  const [existing] = await db
-    .select({ images: listing.images })
-    .from(listing)
-    .where(and(eq(listing.id, id), eq(listing.sellerId, me.id)))
-    .limit(1);
+  const existing = await prisma.listing.findFirst({
+    where: { id, sellerId: me.id },
+    select: { images: true },
+  });
   if (!existing) return { message: "Iklan tidak ditemukan." };
 
   const parsed = parseForm(formData);
@@ -141,14 +140,11 @@ export async function updateListing(
     return { errors: { images: "Foto harus diunggah lewat Cloudinary" } };
   }
 
-  await db
-    .update(listing)
-    .set({ ...values, updatedAt: new Date() })
-    .where(and(eq(listing.id, id), eq(listing.sellerId, me.id)));
+  await prisma.listing.updateMany({ where: { id, sellerId: me.id }, data: values });
 
   // Hapus gambar lama yang sudah tidak dipakai
   const kept = new Set(values.images.map((i) => i.publicId));
-  const removed = existing.images.map((i) => i.publicId).filter((p): p is string => !!p && !kept.has(p));
+  const removed = asImages(existing.images).map((i) => i.publicId).filter((p): p is string => !!p && !kept.has(p));
   await destroyImages(removed);
 
   revalidatePath("/", "layout");
@@ -160,14 +156,15 @@ const statusSchema = z.enum(LISTING_STATUSES.map((s) => s.value) as [string, ...
 export async function setListingStatus(id: string, status: string) {
   const me = await getCurrentUser();
   if (!me) return { ok: false, message: "Silakan masuk dulu." };
+  if (!isUuid(id)) return { ok: false, message: "Iklan tidak ditemukan." };
   const parsed = statusSchema.safeParse(status);
   if (!parsed.success) return { ok: false, message: "Status tidak valid." };
 
   const value = parsed.data as "aktif" | "dipesan" | "terjual";
-  await db
-    .update(listing)
-    .set({ status: value, soldAt: value === "terjual" ? new Date() : null, updatedAt: new Date() })
-    .where(and(eq(listing.id, id), eq(listing.sellerId, me.id)));
+  await prisma.listing.updateMany({
+    where: { id, sellerId: me.id },
+    data: { status: value, soldAt: value === "terjual" ? new Date() : null },
+  });
 
   revalidatePath("/", "layout");
   refresh();
@@ -178,13 +175,12 @@ export async function deleteListing(id: string, redirectTo?: string) {
   const me = await getCurrentUser();
   if (!me) return { ok: false, message: "Silakan masuk dulu." };
 
-  const [deleted] = await db
-    .delete(listing)
-    .where(and(eq(listing.id, id), eq(listing.sellerId, me.id)))
-    .returning({ images: listing.images });
-  if (!deleted) return { ok: false, message: "Iklan tidak ditemukan." };
+  if (!isUuid(id)) return { ok: false, message: "Iklan tidak ditemukan." };
+  const target = await prisma.listing.findFirst({ where: { id, sellerId: me.id }, select: { images: true } });
+  if (!target) return { ok: false, message: "Iklan tidak ditemukan." };
+  await prisma.listing.deleteMany({ where: { id, sellerId: me.id } });
 
-  await destroyImages(deleted.images.map((i) => i.publicId).filter((p): p is string => !!p));
+  await destroyImages(asImages(target.images).map((i) => i.publicId).filter((p): p is string => !!p));
 
   revalidatePath("/", "layout");
   if (redirectTo) redirect(redirectTo);

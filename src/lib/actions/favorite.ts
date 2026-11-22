@@ -1,26 +1,22 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
-import { db } from "@/db";
-import { favorite } from "@/db/schema";
+import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/session";
+import { isUuid } from "@/lib/types";
 
 export async function toggleFavorite(listingId: string) {
   const session = await getSession();
   if (!session) return { ok: false as const, needLogin: true };
+  if (!isUuid(listingId)) return { ok: false as const, needLogin: false };
   const userId = session.user.id;
+  const key = { userId_listingId: { userId, listingId } };
 
-  const [existing] = await db
-    .select({ listingId: favorite.listingId })
-    .from(favorite)
-    .where(and(eq(favorite.userId, userId), eq(favorite.listingId, listingId)))
-    .limit(1);
-
+  const existing = await prisma.favorite.findUnique({ where: key });
   if (existing) {
-    await db.delete(favorite).where(and(eq(favorite.userId, userId), eq(favorite.listingId, listingId)));
+    await prisma.favorite.delete({ where: key });
     return { ok: true as const, favorited: false };
   }
 
-  await db.insert(favorite).values({ userId, listingId }).onConflictDoNothing();
+  await prisma.favorite.upsert({ where: key, create: { userId, listingId }, update: {} });
   return { ok: true as const, favorited: true };
 }

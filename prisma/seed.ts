@@ -4,8 +4,13 @@
  * Membuat beberapa akun demo (password: koscycle123) dan iklan contoh bergambar Unsplash.
  */
 import { config } from "dotenv";
-config({ path: ".env.local" });
-config({ path: ".env" });
+import { PrismaNeon } from "@prisma/adapter-neon";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { hashPassword } from "better-auth/crypto";
+import { PrismaClient } from "../src/generated/prisma/client";
+
+config({ path: ".env.local", quiet: true });
+config({ path: ".env", quiet: true });
 
 const U = (id: string) => ({ url: `https://images.unsplash.com/${id}` });
 
@@ -119,71 +124,78 @@ const LISTINGS: Seed[] = [
 ];
 
 async function main() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL belum diisi di .env.local");
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error("DATABASE_URL belum diisi di .env");
 
-  const { eq, inArray } = await import("drizzle-orm");
-  const { db } = await import("./index");
-  const { account, listing, user } = await import("./schema");
-  const { hashPassword } = await import("better-auth/crypto");
-  const password = await hashPassword("koscycle123");
+  const isNeon = /neon\.tech|vercel-storage\.com|neon\.build/.test(connectionString);
+  const prisma = new PrismaClient({
+    adapter: isNeon ? new PrismaNeon({ connectionString }) : new PrismaPg({ connectionString }),
+  });
 
-  const ids: string[] = [];
-  for (const u of USERS) {
-    const [existing] = await db.select({ id: user.id }).from(user).where(eq(user.email, u.email));
-    let id = existing?.id;
-    if (!id) {
-      id = crypto.randomUUID();
-      await db.insert(user).values({ id, name: u.name, email: u.email, emailVerified: true });
-      // Akun credential Better Auth (login email + password)
-      await db.insert(account).values({
-        id: crypto.randomUUID(),
-        accountId: id,
-        providerId: "credential",
-        userId: id,
-        password,
-      });
-      console.log(`✓ user ${u.email}`);
-    }
-    await db
-      .update(user)
-      .set({
+  try {
+    const password = await hashPassword("koscycle123");
+    const ids: string[] = [];
+
+    for (const u of USERS) {
+      const extra = {
         campus: u.campus,
         whatsapp: u.whatsapp,
         ktmVerified: u.ktmVerified,
         ktmUrl: "https://images.unsplash.com/photo-1544816155-12df9643f363",
-      })
-      .where(eq(user.id, id));
-    ids.push(id);
+      };
+      const existing = await prisma.user.findUnique({ where: { email: u.email }, select: { id: true } });
+      if (existing) {
+        await prisma.user.update({ where: { id: existing.id }, data: extra });
+        ids.push(existing.id);
+        continue;
+      }
+      const id = crypto.randomUUID();
+      await prisma.user.create({
+        data: {
+          id,
+          name: u.name,
+          email: u.email,
+          emailVerified: true,
+          ...extra,
+          // Akun credential Better Auth (login email + password)
+          accounts: {
+            create: { id: crypto.randomUUID(), accountId: id, providerId: "credential", password },
+          },
+        },
+      });
+      console.log(`✓ user ${u.email}`);
+      ids.push(id);
+    }
+
+    await prisma.listing.deleteMany({ where: { sellerId: { in: ids } } });
+
+    const now = Date.now();
+    await prisma.listing.createMany({
+      data: LISTINGS.map((l, i) => ({
+        sellerId: ids[l.seller],
+        title: l.title,
+        description: l.description,
+        category: l.category,
+        campus: l.campus,
+        area: l.area,
+        type: l.type,
+        price: l.price ?? null,
+        barterWish: l.barterWish ?? null,
+        condition: l.condition,
+        images: l.images,
+        status: l.status ?? "aktif",
+        soldAt: l.status === "terjual" ? new Date(now) : null,
+        createdAt: new Date(now - i * 1000 * 60 * 47),
+      })),
+    });
+    console.log(`✓ ${LISTINGS.length} iklan contoh dibuat`);
+    console.log("Akun demo: raka@demo.koscycle.id / koscycle123");
+  } finally {
+    await prisma.$disconnect();
   }
-
-  await db.delete(listing).where(inArray(listing.sellerId, ids));
-
-  const now = Date.now();
-  await db.insert(listing).values(
-    LISTINGS.map((l, i) => ({
-      sellerId: ids[l.seller],
-      title: l.title,
-      description: l.description,
-      category: l.category,
-      campus: l.campus,
-      area: l.area,
-      type: l.type,
-      price: l.price ?? null,
-      barterWish: l.barterWish ?? null,
-      condition: l.condition,
-      images: l.images,
-      status: l.status ?? "aktif",
-      soldAt: l.status === "terjual" ? new Date(now) : null,
-      createdAt: new Date(now - i * 1000 * 60 * 47),
-    })),
-  );
-  console.log(`✓ ${LISTINGS.length} iklan contoh dibuat`);
-  console.log("Akun demo: raka@demo.koscycle.id / koscycle123");
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
